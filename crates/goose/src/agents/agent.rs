@@ -20,7 +20,7 @@ use crate::recipe::{Author, Recipe, Settings};
 use crate::tool_monitor::{ToolCall, ToolMonitor};
 use regex::Regex;
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, instrument};
 
 use crate::agents::extension::{ExtensionConfig, ExtensionError, ExtensionResult, ToolInfo};
@@ -57,7 +57,7 @@ use super::tool_execution::{ToolCallResult, CHAT_MODE_TOOL_SKIPPED_RESPONSE, DEC
 /// The main goose Agent
 pub struct Agent {
     pub(super) provider: Mutex<Option<Arc<dyn Provider>>>,
-    pub(super) extension_manager: Mutex<ExtensionManager>,
+    pub(super) extension_manager: RwLock<ExtensionManager>,
     pub(super) frontend_tools: Mutex<HashMap<String, FrontendTool>>,
     pub(super) frontend_instructions: Mutex<Option<String>>,
     pub(super) prompt_manager: Mutex<PromptManager>,
@@ -85,7 +85,7 @@ impl Agent {
 
         Self {
             provider: Mutex::new(None),
-            extension_manager: Mutex::new(ExtensionManager::new()),
+            extension_manager: RwLock::new(ExtensionManager::new()),
             frontend_tools: Mutex::new(HashMap::new()),
             frontend_instructions: Mutex::new(None),
             prompt_manager: Mutex::new(PromptManager::new()),
@@ -114,7 +114,49 @@ impl Agent {
             monitor.reset();
         }
     }
+}
 
+impl Default for Agent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub enum ToolStreamItem<T> {
+    Message(JsonRpcMessage),
+    Result(T),
+}
+
+pub type ToolStream = Pin<Box<dyn Stream<Item = ToolStreamItem<ToolResult<Vec<Content>>>> + Send>>;
+
+// tool_stream combines a stream of JsonRpcMessages with a future representing the
+// final result of the tool call. MCP notifications are not request-scoped, but
+// this lets us capture all notifications emitted during the tool call for
+// simpler consumption
+pub fn tool_stream<S, F>(rx: S, done: F) -> ToolStream
+where
+    S: Stream<Item = JsonRpcMessage> + Send + Unpin + 'static,
+    F: Future<Output = ToolResult<Vec<Content>>> + Send + 'static,
+{
+    Box::pin(async_stream::stream! {
+        tokio::pin!(done);
+        let mut rx = rx;
+
+        loop {
+            tokio::select! {
+                Some(msg) = rx.next() => {
+                    yield ToolStreamItem::Message(msg);
+                }
+                r = &mut done => {
+                    yield ToolStreamItem::Result(r);
+                    break;
+                }
+            }
+        }
+    })
+}
+
+impl Agent {
     /// Get a reference count clone to the provider
     pub async fn provider(&self) -> Result<Arc<dyn Provider>, anyhow::Error> {
         match &*self.provider.lock().await {
@@ -137,7 +179,7 @@ impl Agent {
     pub async fn get_prefixed_tools(&self) -> ExtensionResult<Vec<Tool>> {
         let mut tools = self
             .extension_manager
-            .lock()
+            .read()
             .await
             .get_prefixed_tools(None)
             .await?;
@@ -192,7 +234,7 @@ impl Agent {
             return (request_id, Ok(ToolCallResult::from(result)));
         }
 
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         let result: ToolCallResult = if tool_call.name == PLATFORM_READ_RESOURCE_TOOL_NAME {
             // Check if the tool is read_resource and handle it separately
             ToolCallResult::from(
@@ -282,7 +324,7 @@ impl Agent {
         extension_name: String,
         request_id: String,
     ) -> (String, Result<Vec<Content>, ToolError>) {
-        let mut extension_manager = self.extension_manager.lock().await;
+        let mut extension_manager = self.extension_manager.write().await;
 
         if action == "disable" {
             let result = extension_manager
@@ -337,7 +379,7 @@ impl Agent {
             if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
                 if let Some(selector) = selector {
                     let vector_action = if action == "disable" { "remove" } else { "add" };
-                    let extension_manager = self.extension_manager.lock().await;
+                    let extension_manager = self.extension_manager.read().await;
                     let selector = Arc::new(selector);
                     if let Err(e) = ToolRouterIndexManager::update_extension_tools(
                         &selector,
@@ -345,7 +387,7 @@ impl Agent {
                         &extension_name,
                         vector_action,
                     )
-                    .await
+                        .await
                     {
                         return (
                             request_id,
@@ -391,7 +433,7 @@ impl Agent {
                 }
             }
             _ => {
-                let mut extension_manager = self.extension_manager.lock().await;
+                let mut extension_manager = self.extension_manager.write().await;
                 extension_manager.add_extension(extension.clone()).await?;
             }
         };
@@ -400,7 +442,7 @@ impl Agent {
         let selector = self.router_tool_selector.lock().await.clone();
         if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
             if let Some(selector) = selector {
-                let extension_manager = self.extension_manager.lock().await;
+                let extension_manager = self.extension_manager.read().await;
                 let selector = Arc::new(selector);
                 if let Err(e) = ToolRouterIndexManager::update_extension_tools(
                     &selector,
@@ -408,7 +450,7 @@ impl Agent {
                     &extension.name(),
                     "add",
                 )
-                .await
+                    .await
                 {
                     return Err(ExtensionError::SetupError(format!(
                         "Failed to index tools for extension {}: {}",
@@ -423,7 +465,7 @@ impl Agent {
     }
 
     pub async fn list_tools(&self, extension_name: Option<String>) -> Vec<Tool> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         let mut prefixed_tools = extension_manager
             .get_prefixed_tools(extension_name.clone())
             .await
@@ -468,7 +510,7 @@ impl Agent {
         let selector = self.router_tool_selector.lock().await.clone();
         if let Some(selector) = selector {
             if let Ok(recent_calls) = selector.get_recent_tool_calls(20).await {
-                let extension_manager = self.extension_manager.lock().await;
+                let extension_manager = self.extension_manager.read().await;
                 // Add recent tool calls to the list, avoiding duplicates
                 for tool_name in recent_calls {
                     // Find the tool in the extension manager's tools
@@ -488,21 +530,21 @@ impl Agent {
     }
 
     pub async fn remove_extension(&self, name: &str) -> Result<()> {
-        let mut extension_manager = self.extension_manager.lock().await;
+        let mut extension_manager = self.extension_manager.write().await;
         extension_manager.remove_extension(name).await?;
 
         // If vector tool selection is enabled, remove tools from the index
         let selector = self.router_tool_selector.lock().await.clone();
         if ToolRouterIndexManager::is_tool_router_enabled(&selector) {
             if let Some(selector) = selector {
-                let extension_manager = self.extension_manager.lock().await;
+                let extension_manager = self.extension_manager.read().await;
                 ToolRouterIndexManager::update_extension_tools(
                     &selector,
                     &extension_manager,
                     name,
                     "remove",
                 )
-                .await?;
+                    .await?;
             }
         }
 
@@ -510,7 +552,7 @@ impl Agent {
     }
 
     pub async fn list_extensions(&self) -> Vec<String> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         extension_manager
             .list_extensions()
             .await
@@ -826,9 +868,10 @@ impl Agent {
             }
             None => return Ok(()),
         };
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         ToolRouterIndexManager::index_platform_tools(&selector, &extension_manager).await?;
         *self.router_tool_selector.lock().await = Some(selector.clone());
+
         Ok(())
     }
 
@@ -839,7 +882,7 @@ impl Agent {
     }
 
     pub async fn list_extension_prompts(&self) -> HashMap<String, Vec<Prompt>> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         extension_manager
             .list_prompts()
             .await
@@ -847,7 +890,7 @@ impl Agent {
     }
 
     pub async fn get_prompt(&self, name: &str, arguments: Value) -> Result<GetPromptResult> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
 
         // First find which extension has this prompt
         let prompts = extension_manager
@@ -870,7 +913,7 @@ impl Agent {
     }
 
     pub async fn get_plan_prompt(&self) -> anyhow::Result<String> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         let tools = extension_manager.get_prefixed_tools(None).await?;
         let tools_info = tools
             .into_iter()
@@ -896,7 +939,7 @@ impl Agent {
     }
 
     pub async fn create_recipe(&self, mut messages: Vec<Message>) -> Result<Recipe> {
-        let extension_manager = self.extension_manager.lock().await;
+        let extension_manager = self.extension_manager.read().await;
         let extensions_info = extension_manager.get_extensions_info().await;
 
         // Get model name from provider
