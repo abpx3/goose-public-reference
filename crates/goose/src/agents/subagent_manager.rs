@@ -321,6 +321,15 @@ impl SubAgentManager {
         
         // Clean up completed subagents
         for id in completed_ids {
+            // Add an explicit termination notification that will be visible to the user
+            let termination_notification = SubAgentNotification {
+                subagent_id: id.clone(),
+                message: format!("Subagent {} has been terminated.", id),
+                timestamp: chrono::Utc::now(),
+                is_complete: true,
+            };
+            notifications.push(termination_notification);
+            
             if let Err(e) = self.terminate_subagent(&id).await {
                 error!("Failed to terminate completed subagent {}: {}", id, e);
             } else {
@@ -347,6 +356,16 @@ impl SubAgentManager {
         
         // Clean up completed subagents
         for id in completed_ids {
+            // Add an explicit termination update
+            let termination_update = SubAgentUpdate {
+                subagent_id: id.clone(),
+                update_type: SubAgentUpdateType::Completion,
+                content: format!("Subagent {} has completed its task and has been terminated.", id),
+                conversation: None,
+                timestamp: chrono::Utc::now(),
+            };
+            updates.push(termination_update);
+            
             if let Err(e) = self.terminate_subagent(&id).await {
                 error!("Failed to terminate completed subagent {}: {}", id, e);
             } else {
