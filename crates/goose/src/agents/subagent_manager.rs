@@ -3,12 +3,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, instrument, warn};
 
 use crate::agents::extension_manager::ExtensionManager;
 use crate::agents::subagent::{SubAgent, SubAgentConfig, SubAgentProgress, SubAgentStatus};
-use crate::agents::subagent_types::SpawnSubAgentArgs;
+use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification};
 use crate::providers::base::Provider;
 use crate::recipe::Recipe;
 
@@ -16,14 +16,19 @@ use crate::recipe::Recipe;
 pub struct SubAgentManager {
     subagents: Arc<RwLock<HashMap<String, Arc<SubAgent>>>>,
     handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    notification_rx: mpsc::Receiver<SubAgentNotification>,
+    notification_tx: mpsc::Sender<SubAgentNotification>,
 }
 
 impl SubAgentManager {
     /// Create a new subagent manager
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(100); // Buffer size of 100
         Self {
             subagents: Arc::new(RwLock::new(HashMap::new())),
             handles: Arc::new(Mutex::new(HashMap::new())),
+            notification_rx: rx,
+            notification_tx: tx,
         }
     }
 
@@ -58,7 +63,12 @@ impl SubAgentManager {
         }
 
         // Create the subagent with the parent agent's provider
-        let (subagent, handle) = SubAgent::new(config, Arc::clone(&provider), Arc::clone(&extension_manager)).await?;
+        let (subagent, handle) = SubAgent::new(
+            config, 
+            Arc::clone(&provider), 
+            Arc::clone(&extension_manager),
+            self.notification_tx.clone()
+        ).await?;
         let subagent_id = subagent.id.clone();
 
         // Store the subagent and its handle
@@ -287,6 +297,32 @@ impl SubAgentManager {
     pub async fn has_subagent(&self, id: &str) -> bool {
         let subagents = self.subagents.read().await;
         subagents.contains_key(id)
+    }
+    
+    /// Process and retrieve pending notifications
+    pub async fn process_notifications(&mut self) -> Vec<SubAgentNotification> {
+        let mut notifications = Vec::new();
+        let mut completed_ids = Vec::new();
+        
+        // Try to receive all pending notifications without blocking
+        while let Ok(notification) = self.notification_rx.try_recv() {
+            // If this is a completion notification, mark for cleanup
+            if notification.is_complete {
+                completed_ids.push(notification.subagent_id.clone());
+            }
+            notifications.push(notification);
+        }
+        
+        // Clean up completed subagents
+        for id in completed_ids {
+            if let Err(e) = self.terminate_subagent(&id).await {
+                error!("Failed to terminate completed subagent {}: {}", id, e);
+            } else {
+                debug!("Automatically terminated completed subagent {}", id);
+            }
+        }
+        
+        notifications
     }
 }
 

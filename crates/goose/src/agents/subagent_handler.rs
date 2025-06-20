@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agents::Agent;
-use crate::agents::subagent_types::SpawnSubAgentArgs;
+use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification};
 
 
 impl Agent {
@@ -199,6 +199,16 @@ impl Agent {
                 "Failed to send message to subagent: {}",
                 e
             ))),
+        }
+    }
+    
+    /// Get notifications from subagents
+    pub async fn get_subagent_notifications(&self) -> Vec<SubAgentNotification> {
+        let mut subagent_manager = self.subagent_manager.lock().await;
+        if let Some(manager) = subagent_manager.as_mut() {
+            manager.process_notifications().await
+        } else {
+            Vec::new()
         }
     }
 } 

@@ -17,10 +17,12 @@ use mcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
 use futures::stream::{self, Stream};
+
+use crate::agents::subagent_types::SubAgentNotification;
 
 /// Status of a subagent
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,15 +96,17 @@ pub struct SubAgent {
     pub created_at: DateTime<Utc>,
     pub recipe_extensions: Arc<Mutex<Vec<String>>>,
     pub missing_extensions: Arc<Mutex<Vec<String>>>, // Track extensions that weren't enabled
+    pub notification_tx: mpsc::Sender<SubAgentNotification>,
 }
 
 impl SubAgent {
     /// Create a new subagent with the given configuration and provider
-    #[instrument(skip(config, provider, extension_manager))]
+    #[instrument(skip(config, provider, extension_manager, notification_tx))]
     pub async fn new(
         config: SubAgentConfig,
         provider: Arc<dyn Provider>,
         extension_manager: Arc<tokio::sync::RwLockReadGuard<'_, ExtensionManager>>,
+        notification_tx: mpsc::Sender<SubAgentNotification>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), anyhow::Error> {
         debug!("Creating new subagent with id: {}", config.id);
 
@@ -138,7 +142,12 @@ impl SubAgent {
             created_at: Utc::now(),
             recipe_extensions: Arc::new(Mutex::new(recipe_extensions)),
             missing_extensions: Arc::new(Mutex::new(missing_extensions)),
+            notification_tx,
         });
+
+        // Send initial notification
+        let subagent_clone = Arc::clone(&subagent);
+        subagent_clone.send_notification("Subagent created and ready".to_string(), false).await;
 
         // Create a background task handle (for future use with streaming/monitoring)
         let subagent_clone = Arc::clone(&subagent);
@@ -159,7 +168,32 @@ impl SubAgent {
     /// Update the status of the subagent
     async fn set_status(&self, status: SubAgentStatus) {
         let mut current_status = self.status.write().await;
-        *current_status = status;
+        *current_status = status.clone();
+        
+        // If status is Completed or Terminated, send completion notification
+        match &status {
+            SubAgentStatus::Completed(msg) => {
+                self.send_notification(format!("Completed: {}", msg), true).await;
+            }
+            SubAgentStatus::Terminated => {
+                self.send_notification("Terminated".to_string(), true).await;
+            }
+            _ => {}
+        }
+    }
+    
+    /// Send a notification about the subagent's activity
+    pub async fn send_notification(&self, message: String, is_complete: bool) {
+        let notification = SubAgentNotification {
+            subagent_id: self.id.clone(),
+            message,
+            timestamp: Utc::now(),
+            is_complete,
+        };
+        
+        if let Err(e) = self.notification_tx.send(notification).await {
+            error!("Failed to send notification from subagent {}: {}", self.id, e);
+        }
     }
 
     /// Get current progress information
@@ -190,6 +224,7 @@ impl SubAgent {
         extension_manager: Arc<tokio::sync::RwLockReadGuard<'_, ExtensionManager>>
     ) -> Result<Message, anyhow::Error> {
         debug!("Processing message for subagent {}", self.id);
+        self.send_notification(format!("Processing message: {}", message), false).await;
 
         // Check if we've exceeded max turns
         {
@@ -216,6 +251,7 @@ impl SubAgent {
         {
             let mut turn_count = self.turn_count.lock().await;
             *turn_count += 1;
+            self.send_notification(format!("Turn {}/{}", turn_count, self.config.max_turns.unwrap_or(0)), false).await;
         }
 
         // Get the current conversation for context
@@ -270,6 +306,12 @@ impl SubAgent {
                     // Handle remaining tools
                     for request in &tool_requests {
                         if let Ok(tool_call) = &request.tool_call {
+                            // Send notification about tool usage
+                            self.send_notification(
+                                format!("Using tool: {}", tool_call.name), 
+                                false
+                            ).await;
+                            
                             match extension_manager.dispatch_tool_call(tool_call.clone()).await {
                                 Ok(result) => {
                                     let tool_response = result.result.await;
@@ -277,6 +319,12 @@ impl SubAgent {
                                     // Add tool response to conversation
                                     self.add_message(Message::user().with_text(format!("Tool response: {:?}", tool_response))).await;
                                     messages.push(Message::user().with_text(format!("Tool response: {:?}", tool_response)));
+                                    
+                                    // Send notification about tool completion
+                                    self.send_notification(
+                                        format!("Tool {} completed", tool_call.name), 
+                                        false
+                                    ).await;
                                 }
                                 Err(e) => {
                                     final_response = final_response.with_tool_response(
@@ -286,6 +334,12 @@ impl SubAgent {
                                     // Add error to conversation
                                     self.add_message(Message::user().with_text(format!("Tool error: {}", e))).await;
                                     messages.push(Message::user().with_text(format!("Tool error: {}", e)));
+                                    
+                                    // Send notification about tool error
+                                    self.send_notification(
+                                        format!("Tool {} error: {}", tool_call.name, e), 
+                                        false
+                                    ).await;
                                 }
                             }
                         }
@@ -294,6 +348,12 @@ impl SubAgent {
                     if tool_requests.is_empty() {
                         self.add_message(final_response.clone()).await;
                         messages.push(final_response.clone());
+
+                        // Send notification about response
+                        self.send_notification(
+                            format!("Responded: {}", final_response.as_concat_text()), 
+                            false
+                        ).await;
 
                         // Set status back to ready and return the final response
                         self.set_status(SubAgentStatus::Ready).await;

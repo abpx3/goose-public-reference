@@ -608,6 +608,20 @@ impl Agent {
         Ok(Box::pin(async_stream::try_stream! {
             let _ = reply_span.enter();
             loop {
+                // Check for subagent notifications
+                let notifications = self.get_subagent_notifications().await;
+                for notification in notifications {
+                    // Convert notifications to AgentEvents
+                    yield AgentEvent::Message(
+                        Message::assistant().with_text(
+                            format!("Subagent {}: {}", 
+                                notification.subagent_id, 
+                                notification.message
+                            )
+                        )
+                    );
+                }
+                
                 match Self::generate_response_from_provider(
                     self.provider().await?,
                     &system_prompt,
@@ -809,6 +823,19 @@ impl Agent {
 
                         messages.push(response);
                         messages.push(final_message_tool_resp);
+                        
+                        // Check for subagent notifications again before next iteration
+                        let notifications = self.get_subagent_notifications().await;
+                        for notification in notifications {
+                            yield AgentEvent::Message(
+                                Message::assistant().with_text(
+                                    format!("Subagent {}: {}", 
+                                        notification.subagent_id, 
+                                        notification.message
+                                    )
+                                )
+                            );
+                        }
                     },
                     Err(ProviderError::ContextLengthExceeded(_)) => {
                         // At this point, the last message should be a user message
