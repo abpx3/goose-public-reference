@@ -8,7 +8,7 @@ use tracing::{debug, error, instrument, warn};
 
 use crate::agents::extension_manager::ExtensionManager;
 use crate::agents::subagent::{SubAgent, SubAgentConfig, SubAgentProgress, SubAgentStatus};
-use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification};
+use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification, SubAgentUpdate};
 use crate::providers::base::Provider;
 use crate::recipe::Recipe;
 
@@ -18,17 +18,22 @@ pub struct SubAgentManager {
     handles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     notification_rx: mpsc::Receiver<SubAgentNotification>,
     notification_tx: mpsc::Sender<SubAgentNotification>,
+    update_rx: mpsc::Receiver<SubAgentUpdate>,
+    update_tx: mpsc::Sender<SubAgentUpdate>,
 }
 
 impl SubAgentManager {
     /// Create a new subagent manager
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel(100); // Buffer size of 100
+        let (notification_tx, notification_rx) = mpsc::channel(100); // Buffer size of 100
+        let (update_tx, update_rx) = mpsc::channel(100); // Buffer size of 100
         Self {
             subagents: Arc::new(RwLock::new(HashMap::new())),
             handles: Arc::new(Mutex::new(HashMap::new())),
-            notification_rx: rx,
-            notification_tx: tx,
+            notification_rx,
+            notification_tx,
+            update_rx,
+            update_tx,
         }
     }
 
@@ -67,7 +72,8 @@ impl SubAgentManager {
             config, 
             Arc::clone(&provider), 
             Arc::clone(&extension_manager),
-            self.notification_tx.clone()
+            self.notification_tx.clone(),
+            self.update_tx.clone()
         ).await?;
         let subagent_id = subagent.id.clone();
 
@@ -323,6 +329,32 @@ impl SubAgentManager {
         }
         
         notifications
+    }
+    
+    /// Process and retrieve pending updates (for main agent only)
+    pub async fn process_updates(&mut self) -> Vec<SubAgentUpdate> {
+        let mut updates = Vec::new();
+        let mut completed_ids = Vec::new();
+        
+        // Try to receive all pending updates without blocking
+        while let Ok(update) = self.update_rx.try_recv() {
+            // If this is a completion update, mark for cleanup
+            if update.update_type == SubAgentUpdateType::Completion {
+                completed_ids.push(update.subagent_id.clone());
+            }
+            updates.push(update);
+        }
+        
+        // Clean up completed subagents
+        for id in completed_ids {
+            if let Err(e) = self.terminate_subagent(&id).await {
+                error!("Failed to terminate completed subagent {}: {}", id, e);
+            } else {
+                debug!("Automatically terminated completed subagent {}", id);
+            }
+        }
+        
+        updates
     }
 }
 

@@ -22,7 +22,7 @@ use tracing::{debug, error, instrument};
 use uuid::Uuid;
 use futures::stream::{self, Stream};
 
-use crate::agents::subagent_types::SubAgentNotification;
+use crate::agents::subagent_types::{SubAgentNotification, SubAgentUpdate, SubAgentUpdateType};
 
 /// Status of a subagent
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,17 +96,19 @@ pub struct SubAgent {
     pub created_at: DateTime<Utc>,
     pub recipe_extensions: Arc<Mutex<Vec<String>>>,
     pub missing_extensions: Arc<Mutex<Vec<String>>>, // Track extensions that weren't enabled
-    pub notification_tx: mpsc::Sender<SubAgentNotification>,
+    pub notification_tx: mpsc::Sender<SubAgentNotification>, // For user-visible notifications
+    pub update_tx: mpsc::Sender<SubAgentUpdate>, // For main agent internal updates
 }
 
 impl SubAgent {
     /// Create a new subagent with the given configuration and provider
-    #[instrument(skip(config, provider, extension_manager, notification_tx))]
+    #[instrument(skip(config, provider, extension_manager, notification_tx, update_tx))]
     pub async fn new(
         config: SubAgentConfig,
         provider: Arc<dyn Provider>,
         extension_manager: Arc<tokio::sync::RwLockReadGuard<'_, ExtensionManager>>,
         notification_tx: mpsc::Sender<SubAgentNotification>,
+        update_tx: mpsc::Sender<SubAgentUpdate>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), anyhow::Error> {
         debug!("Creating new subagent with id: {}", config.id);
 
@@ -143,11 +145,18 @@ impl SubAgent {
             recipe_extensions: Arc::new(Mutex::new(recipe_extensions)),
             missing_extensions: Arc::new(Mutex::new(missing_extensions)),
             notification_tx,
+            update_tx,
         });
 
         // Send initial notification
         let subagent_clone = Arc::clone(&subagent);
         subagent_clone.send_notification("Subagent created and ready".to_string(), false).await;
+        
+        // Send initial update to main agent
+        subagent_clone.send_update(
+            SubAgentUpdateType::Progress,
+            "Subagent initialized and ready".to_string()
+        ).await;
 
         // Create a background task handle (for future use with streaming/monitoring)
         let subagent_clone = Arc::clone(&subagent);
@@ -173,10 +182,24 @@ impl SubAgent {
         // If status is Completed or Terminated, send completion notification
         match &status {
             SubAgentStatus::Completed(msg) => {
+                // User-visible notification
                 self.send_notification(format!("Completed: {}", msg), true).await;
+                
+                // Internal update to main agent
+                self.send_update(
+                    SubAgentUpdateType::Completion,
+                    format!("Completed: {}", msg)
+                ).await;
             }
             SubAgentStatus::Terminated => {
+                // User-visible notification
                 self.send_notification("Terminated".to_string(), true).await;
+                
+                // Internal update to main agent
+                self.send_update(
+                    SubAgentUpdateType::Completion,
+                    "Terminated".to_string()
+                ).await;
             }
             _ => {}
         }
@@ -193,6 +216,29 @@ impl SubAgent {
         
         if let Err(e) = self.notification_tx.send(notification).await {
             error!("Failed to send notification from subagent {}: {}", self.id, e);
+        }
+    }
+    
+    /// Send an update to the main agent (not visible to user)
+    pub async fn send_update(&self, update_type: SubAgentUpdateType, content: String) {
+        let conversation = if update_type == SubAgentUpdateType::Completion || 
+                             update_type == SubAgentUpdateType::Result {
+            // Include full conversation for completion and results
+            Some(self.get_formatted_conversation().await)
+        } else {
+            None
+        };
+        
+        let update = SubAgentUpdate {
+            subagent_id: self.id.clone(),
+            update_type,
+            content,
+            conversation,
+            timestamp: Utc::now(),
+        };
+        
+        if let Err(e) = self.update_tx.send(update).await {
+            error!("Failed to send update from subagent {}: {}", self.id, e);
         }
     }
 
@@ -252,6 +298,12 @@ impl SubAgent {
             let mut turn_count = self.turn_count.lock().await;
             *turn_count += 1;
             self.send_notification(format!("Turn {}/{}", turn_count, self.config.max_turns.unwrap_or(0)), false).await;
+            
+            // Send update to main agent
+            self.send_update(
+                SubAgentUpdateType::Progress,
+                format!("Processing turn {}/{}", turn_count, self.config.max_turns.unwrap_or(0))
+            ).await;
         }
 
         // Get the current conversation for context
@@ -325,6 +377,12 @@ impl SubAgent {
                                         format!("Tool {} completed", tool_call.name), 
                                         false
                                     ).await;
+                                    
+                                    // Send update to main agent
+                                    self.send_update(
+                                        SubAgentUpdateType::Progress,
+                                        format!("Tool {} completed", tool_call.name)
+                                    ).await;
                                 }
                                 Err(e) => {
                                     final_response = final_response.with_tool_response(
@@ -340,6 +398,12 @@ impl SubAgent {
                                         format!("Tool {} error: {}", tool_call.name, e), 
                                         false
                                     ).await;
+                                    
+                                    // Send update to main agent
+                                    self.send_update(
+                                        SubAgentUpdateType::Error,
+                                        format!("Tool {} error: {}", tool_call.name, e)
+                                    ).await;
                                 }
                             }
                         }
@@ -353,6 +417,12 @@ impl SubAgent {
                         self.send_notification(
                             format!("Responded: {}", final_response.as_concat_text()), 
                             false
+                        ).await;
+                        
+                        // Send update to main agent with the result
+                        self.send_update(
+                            SubAgentUpdateType::Result,
+                            format!("Result: {}", final_response.as_concat_text())
                         ).await;
 
                         // Set status back to ready and return the final response

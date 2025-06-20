@@ -18,6 +18,23 @@ pub struct SubAgentNotification {
     pub is_complete: bool, // Flag to indicate if this is a completion notification
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SubAgentUpdateType {
+    Progress,    // Regular progress update
+    Completion,  // Task completed
+    Error,       // Error occurred
+    Result,      // Final or intermediate result
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentUpdate {
+    pub subagent_id: String,
+    pub update_type: SubAgentUpdateType,
+    pub content: String,
+    pub conversation: Option<String>, // Full conversation history
+    pub timestamp: DateTime<Utc>,
+}
+
 impl SpawnSubAgentArgs {
     pub fn new_with_recipe(recipe_name: String, message: String) -> Self {
         Self {

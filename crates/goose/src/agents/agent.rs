@@ -604,6 +604,9 @@ impl Agent {
         {
             debug!("user_message" = &content);
         }
+        
+        // Create a context map to store subagent results
+        let subagent_context = Arc::new(Mutex::new(HashMap::<String, String>::new()));
 
         Ok(Box::pin(async_stream::try_stream! {
             let _ = reply_span.enter();
@@ -620,6 +623,39 @@ impl Agent {
                             )
                         )
                     );
+                }
+                
+                // Process subagent updates (not visible to user)
+                let updates = self.get_subagent_updates().await;
+                if !updates.is_empty() {
+                    // Update the context with subagent results
+                    let mut context = subagent_context.lock().await;
+                    for update in updates {
+                        if update.update_type == SubAgentUpdateType::Result || 
+                           update.update_type == SubAgentUpdateType::Completion {
+                            let key = format!("subagent_{}", update.subagent_id);
+                            let value = if let Some(conversation) = update.conversation {
+                                format!("{}\n\nFull conversation:\n{}", update.content, conversation)
+                            } else {
+                                update.content
+                            };
+                            context.insert(key, value);
+                        }
+                    }
+                    
+                    // If we have new results, add a hidden message to the context
+                    if !context.is_empty() {
+                        // Create a hidden message with subagent results for context
+                        let mut context_message = String::new();
+                        context_message.push_str("Subagent results (not visible to user):\n\n");
+                        
+                        for (id, result) in context.iter() {
+                            context_message.push_str(&format!("--- {} ---\n{}\n\n", id, result));
+                        }
+                        
+                        // Add to messages without yielding to user
+                        messages.push(Message::user().with_text(context_message));
+                    }
                 }
                 
                 match Self::generate_response_from_provider(
@@ -835,6 +871,39 @@ impl Agent {
                                     )
                                 )
                             );
+                        }
+                        
+                        // Process subagent updates (not visible to user)
+                        let updates = self.get_subagent_updates().await;
+                        if !updates.is_empty() {
+                            // Update the context with subagent results
+                            let mut context = subagent_context.lock().await;
+                            for update in updates {
+                                if update.update_type == SubAgentUpdateType::Result || 
+                                   update.update_type == SubAgentUpdateType::Completion {
+                                    let key = format!("subagent_{}", update.subagent_id);
+                                    let value = if let Some(conversation) = update.conversation {
+                                        format!("{}\n\nFull conversation:\n{}", update.content, conversation)
+                                    } else {
+                                        update.content
+                                    };
+                                    context.insert(key, value);
+                                }
+                            }
+                            
+                            // If we have new results, add a hidden message to the context
+                            if !context.is_empty() {
+                                // Create a hidden message with subagent results for context
+                                let mut context_message = String::new();
+                                context_message.push_str("Subagent results (not visible to user):\n\n");
+                                
+                                for (id, result) in context.iter() {
+                                    context_message.push_str(&format!("--- {} ---\n{}\n\n", id, result));
+                                }
+                                
+                                // Add to messages without yielding to user
+                                messages.push(Message::user().with_text(context_message));
+                            }
                         }
                     },
                     Err(ProviderError::ContextLengthExceeded(_)) => {
