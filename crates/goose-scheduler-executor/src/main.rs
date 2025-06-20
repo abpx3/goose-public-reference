@@ -168,6 +168,9 @@ async fn execute_recipe(job_id: &str, recipe_path: &str) -> Result<String> {
             Ok(AgentEvent::ModelChange { .. }) => {
                 // Model change events are informational, just continue
             }
+            Ok(AgentEvent::SubagentNotification { .. }) => {
+                // Handle subagent notifications if needed
+            }
             Err(e) => {
                 return Err(anyhow!("Error receiving message from agent: {}", e));
             }

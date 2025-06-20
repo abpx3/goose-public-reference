@@ -76,6 +76,7 @@ pub enum AgentEvent {
     Message(Message),
     McpNotification((String, JsonRpcMessage)),
     ModelChange { model: String, mode: String },
+    SubagentNotification { subagent_id: String, message: String },
 }
 
 impl Agent {
@@ -615,15 +616,11 @@ impl Agent {
                 // Check for subagent notifications
                 let notifications = self.get_subagent_notifications().await;
                 for notification in notifications {
-                    // Convert notifications to AgentEvents
-                    yield AgentEvent::Message(
-                        Message::assistant().with_text(
-                            format!("Subagent {}: {}", 
-                                notification.subagent_id, 
-                                notification.message
-                            )
-                        )
-                    );
+                    // Convert notifications to SubagentNotification events (not persisted to history)
+                    yield AgentEvent::SubagentNotification {
+                        subagent_id: notification.subagent_id,
+                        message: notification.message,
+                    };
                 }
                 
                 // Process subagent updates (not visible to user)

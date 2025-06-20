@@ -262,6 +262,9 @@ async fn handler(
                                 ).await;
                             }
                         }
+                        Ok(Some(Ok(AgentEvent::SubagentNotification { .. }))) => {
+                            // Handle subagent notifications if needed
+                        }
                         Ok(Some(Err(e))) => {
                             tracing::error!("Error processing message: {}", e);
                             let _ = stream_event(
@@ -374,6 +377,9 @@ async fn ask_handler(
             Ok(AgentEvent::McpNotification(n)) => {
                 // Handle notifications if needed
                 tracing::info!("Received notification: {:?}", n);
+            }
+            Ok(AgentEvent::SubagentNotification { .. }) => {
+                // Handle subagent notifications if needed
             }
             Err(e) => {
                 tracing::error!("Error processing as_ai message: {}", e);
