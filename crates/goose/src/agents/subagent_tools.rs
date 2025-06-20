@@ -14,20 +14,32 @@ pub fn spawn_interactive_subagent_tool() -> Tool {
         indoc! {r#"
             Spawn a specialized subagent to handle specific tasks independently.
             
-            Subagents are configured using recipes that define their instructions, extensions, and behavior.
+            You can configure the subagent in two ways:
+            1. Using a recipe file that defines instructions, extensions, and behavior
+            2. Providing direct instructions for ad-hoc tasks
+            
             Each subagent maintains its own conversation history and can be used for specialized tasks
-            like research, code review, or interactive assistance.
+            like research, code review, file modifications, or interactive assistance.
             
             The subagent will process the initial message and be ready for further interaction.
             Use other subagent tools to manage, communicate with, or terminate the subagent.
+            
+            Examples:
+            - "spawn subagent to change these files from using unittest to pytest: file1.py, file2.py"
+            - "spawn subagent to research and summarize the latest developments in AI"
+            - "spawn subagent to review this code for security issues"
         "#}.to_string(),
         json!({
             "type": "object",
-            "required": ["recipe_name", "message"],
+            "required": ["message"],
             "properties": {
                 "recipe_name": {
                     "type": "string", 
-                    "description": "Name of the recipe file to configure the subagent (e.g., 'research_assistant_recipe.yaml')"
+                    "description": "Name of the recipe file to configure the subagent (e.g., 'research_assistant_recipe.yaml'). Either this or 'instructions' must be provided."
+                },
+                "instructions": {
+                    "type": "string", 
+                    "description": "Direct instructions for the subagent's task. Either this or 'recipe_name' must be provided. Example: 'You are a code refactoring assistant. Help convert unittest tests to pytest format.'"
                 },
                 "message": {
                     "type": "string", 

@@ -35,16 +35,21 @@ impl SubAgentManager {
         provider: Arc<dyn Provider>,
         extension_manager: Arc<tokio::sync::RwLockReadGuard<'_, ExtensionManager>>,
     ) -> Result<String> {
-        debug!(
-            "Spawning interactive subagent with recipe: {}",
-            args.recipe_name
-        );
+        debug!("Spawning interactive subagent");
 
-        // Load the recipe
-        let recipe = self.load_recipe(&args.recipe_name).await?;
+        // Create subagent config based on whether we have a recipe or instructions
+        let mut config = if let Some(recipe_name) = args.recipe_name {
+            debug!("Using recipe: {}", recipe_name);
+            // Load the recipe
+            let recipe = self.load_recipe(&recipe_name).await?;
+            SubAgentConfig::new_with_recipe(recipe)
+        } else if let Some(instructions) = args.instructions {
+            debug!("Using direct instructions");
+            SubAgentConfig::new_with_instructions(instructions)
+        } else {
+            return Err(anyhow!("Either recipe_name or instructions must be provided"));
+        };
 
-        // Create subagent config
-        let mut config = SubAgentConfig::new(recipe);
         if let Some(max_turns) = args.max_turns {
             config = config.with_max_turns(max_turns);
         }

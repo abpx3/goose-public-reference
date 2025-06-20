@@ -19,19 +19,25 @@ impl Agent {
         })?;
 
         // Parse arguments
-        let recipe_name = arguments
-            .get("recipe_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionError("Missing recipe_name parameter".to_string()))?
-            .to_string();
-
         let message = arguments
             .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionError("Missing message parameter".to_string()))?
             .to_string();
 
-        let mut args = SpawnSubAgentArgs::new(recipe_name, message);
+        // Either recipe_name or instructions must be provided
+        let recipe_name = arguments.get("recipe_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let instructions = arguments.get("instructions").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let mut args = if let Some(recipe_name) = recipe_name {
+            SpawnSubAgentArgs::new_with_recipe(recipe_name, message)
+        } else if let Some(instructions) = instructions {
+            SpawnSubAgentArgs::new_with_instructions(instructions, message)
+        } else {
+            return Err(ToolError::ExecutionError(
+                "Either recipe_name or instructions parameter must be provided".to_string()
+            ));
+        };
 
         if let Some(max_turns) = arguments.get("max_turns").and_then(|v| v.as_u64()) {
             args = args.with_max_turns(max_turns as usize);

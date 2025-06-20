@@ -35,16 +35,28 @@ pub enum SubAgentStatus {
 #[derive(Debug)]
 pub struct SubAgentConfig {
     pub id: String,
-    pub recipe: Recipe,
+    pub recipe: Option<Recipe>,
+    pub instructions: Option<String>,
     pub max_turns: Option<usize>,
     pub timeout_seconds: Option<u64>,
 }
 
 impl SubAgentConfig {
-    pub fn new(recipe: Recipe) -> Self {
+    pub fn new_with_recipe(recipe: Recipe) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            recipe,
+            recipe: Some(recipe),
+            instructions: None,
+            max_turns: None,
+            timeout_seconds: None,
+        }
+    }
+
+    pub fn new_with_instructions(instructions: String) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            recipe: None,
+            instructions: Some(instructions),
             max_turns: None,
             timeout_seconds: None,
         }
@@ -98,17 +110,23 @@ impl SubAgent {
         let mut recipe_extensions = Vec::new();
 
         // Check if extensions from recipe exist in the extension manager
-        if let Some(extensions) = &config.recipe.extensions {
-            for extension in extensions {
-                let extension_name = extension.name();
-                let existing_extensions = extension_manager.list_extensions().await?;
-                
-                if !existing_extensions.contains(&extension_name) {
-                    missing_extensions.push(extension_name);
-                } else {
-                    recipe_extensions.push(extension_name);
+        if let Some(recipe) = &config.recipe {
+            if let Some(extensions) = &recipe.extensions {
+                for extension in extensions {
+                    let extension_name = extension.name();
+                    let existing_extensions = extension_manager.list_extensions().await?;
+                    
+                    if !existing_extensions.contains(&extension_name) {
+                        missing_extensions.push(extension_name);
+                    } else {
+                        recipe_extensions.push(extension_name);
+                    }
                 }
             }
+        } else {
+            // If no recipe, inherit all extensions from the parent agent
+            let existing_extensions = extension_manager.list_extensions().await?;
+            recipe_extensions = existing_extensions;
         }
 
         let subagent = Arc::new(SubAgent {
@@ -206,10 +224,18 @@ impl SubAgent {
         // Get tools and system prompt from the extension manager
         let tools: Vec<Tool> = extension_manager.get_prefixed_tools(None).await?;
         let toolshim_tools: Vec<Tool> = vec![];
+        
+        // Build system prompt based on whether we have a recipe or direct instructions
+        let instructions = if let Some(recipe) = &self.config.recipe {
+            recipe.instructions.as_deref().unwrap_or("")
+        } else {
+            self.config.instructions.as_deref().unwrap_or("")
+        };
+
         let system_prompt = format!(
             "You are a helpful subagent that was spawned by goose. You converse with goose and can use the following tools: {}\n\n{}",
             self.recipe_extensions.lock().await.join(", "),
-            self.config.recipe.instructions.as_deref().unwrap_or("")
+            instructions
         );
 
         // Generate response from provider
@@ -323,7 +349,15 @@ impl SubAgent {
     pub async fn get_formatted_conversation(&self) -> String {
         let conversation = self.get_conversation().await;
         let mut formatted = format!("=== Subagent {} Conversation ===\n", self.id);
-        formatted.push_str(&format!("Recipe: {}\n", self.config.recipe.title));
+        
+        if let Some(recipe) = &self.config.recipe {
+            formatted.push_str(&format!("Recipe: {}\n", recipe.title));
+        } else if let Some(instructions) = &self.config.instructions {
+            formatted.push_str(&format!("Instructions: {}\n", instructions));
+        } else {
+            formatted.push_str("Mode: Ad-hoc subagent\n");
+        }
+        
         formatted.push_str(&format!(
             "Created: {}\n",
             self.created_at.format("%Y-%m-%d %H:%M:%S UTC")
