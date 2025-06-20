@@ -8,7 +8,7 @@ use tracing::{debug, error, instrument, warn};
 
 use crate::agents::extension_manager::ExtensionManager;
 use crate::agents::subagent::{SubAgent, SubAgentConfig, SubAgentProgress, SubAgentStatus};
-use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification, SubAgentUpdate};
+use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification, SubAgentUpdate, SubAgentUpdateType};
 use crate::providers::base::Provider;
 use crate::recipe::Recipe;
 

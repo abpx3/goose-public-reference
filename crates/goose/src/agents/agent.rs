@@ -46,6 +46,7 @@ use crate::agents::subagent_tools::{
     SUBAGENT_CHECK_PROGRESS_TOOL_NAME, SUBAGENT_LIST_TOOL_NAME,
     SUBAGENT_SPAWN_INTERACTIVE_TOOL_NAME, SUBAGENT_SEND_MESSAGE_TOOL_NAME,
 };
+use crate::agents::subagent_types::SubAgentUpdateType;
 
 use super::platform_tools;
 use super::router_tools;

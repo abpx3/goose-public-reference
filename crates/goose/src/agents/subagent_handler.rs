@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use crate::agents::Agent;
-use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification, SubAgentUpdate};
+use crate::agents::subagent_types::{SpawnSubAgentArgs, SubAgentNotification, SubAgentUpdate, SubAgentUpdateType};
 
 
 impl Agent {

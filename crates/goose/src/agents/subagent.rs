@@ -13,14 +13,13 @@ use chrono::{DateTime, Utc};
 use mcp_core::{
     handler::ToolError,
     role::Role,
-    tool::{Tool, ToolCall},
+    tool::Tool,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
-use futures::stream::{self, Stream};
 
 use crate::agents::subagent_types::{SubAgentNotification, SubAgentUpdate, SubAgentUpdateType};
 
@@ -102,10 +101,10 @@ pub struct SubAgent {
 
 impl SubAgent {
     /// Create a new subagent with the given configuration and provider
-    #[instrument(skip(config, provider, extension_manager, notification_tx, update_tx))]
+    #[instrument(skip(config, _provider, extension_manager, notification_tx, update_tx))]
     pub async fn new(
         config: SubAgentConfig,
-        provider: Arc<dyn Provider>,
+        _provider: Arc<dyn Provider>,
         extension_manager: Arc<tokio::sync::RwLockReadGuard<'_, ExtensionManager>>,
         notification_tx: mpsc::Sender<SubAgentNotification>,
         update_tx: mpsc::Sender<SubAgentUpdate>,
